@@ -104,7 +104,7 @@ biasbound=function(observed, target, svd.out, w, w.pop = NULL,
         if(length(w.pop) != length(observed)) {
             stop("\"w.pop\" must have the same length as the total number of units")
         }
-        #sampledinpop == TRUE, check that w.pop = 1 for all sampled/treated units
+        #sampledinpop == TRUE, check that w.pop = 1 for all sampled/control units
         if(sum(target) == length(target) && !(sum(w.pop[observed]) == sum(observed)
                                              & sd(w.pop[observed]) == 0)) {
             stop("\"w.pop\" must the value 1 for all sampled/treated units")
@@ -838,7 +838,7 @@ kbal = function(allx, useasbases=NULL, b=NULL,
   if(!is.null(K) & !is.null(K.svd)){
       stop("\"K\" and \"K.svd\" should not be specified simultaneously")
 #CASE 1: if user pases K, always conduct SVD upto maxnumdims or numdims
-  } else if(!is.null(K)) { 
+  } else if(!is.null(K)) { #### user passes in K -> go do svd
       #error checks:
       #check maxnumdims
       if(maxnumdims > ncol(K) ) {
@@ -865,6 +865,11 @@ kbal = function(allx, useasbases=NULL, b=NULL,
       #provided we pass all those checks get svd with RSpectra
       if(printprogress == TRUE) {cat("Using user-supplied K \n")}
       #if user does not ask for fullsvd, and does not give numdims, get svd upto maxnumdims
+      
+      #WEIGHTING K FIRST, BEFORE SVD
+      cat("Weighting K by user-specified weights \n")
+      K <- w.pop*K
+      
       if(!fullSVD) { 
           if(printprogress) {cat("Running SVD on kernel matrix up to",
                                  trunc_svd_dims, "dimensions \n")}
@@ -905,6 +910,7 @@ kbal = function(allx, useasbases=NULL, b=NULL,
       }
 #CASE 2: if user pases in K.svd never conduct SVD   
   } else if(!is.null(K.svd)) {
+     
       #NB: we require K.svd to have $u and $d just as a real svd woulda
       #error catches
       #check maxnumdims
@@ -933,6 +939,10 @@ kbal = function(allx, useasbases=NULL, b=NULL,
       } else if(ncol(K.svd$u) != length(K.svd$d)) {
           stop("\"K.svd\" must be a list object containing \"u\" the left singular vectors and \"d\" the singular values. Dimensions of \"u\" do not match dimensions of \"d\".")
       }
+      if(var(w.pop) != 0) {
+          warning("\"population.w\" argument not used with \"K.svd\" is user-supplied", immediate. = T)
+      }
+      
       svd.out = K.svd
       U = K.svd$u
       K = U
@@ -950,6 +960,10 @@ kbal = function(allx, useasbases=NULL, b=NULL,
                     linkernel = TRUE)
       }
      #if user does not ask for full svd, and does not pass in numdims, get svd upto maxnumdim
+      #WEIGHTING K FIRST
+      cat("Weighting K by user-specified weights \n")
+      K <- w.pop*K
+      
       if(!fullSVD) {
           if(printprogress) {cat("Running SVD on kernel matrix up to",
                                  trunc_svd_dims, "dimensions \n")}
@@ -1015,13 +1029,17 @@ kbal = function(allx, useasbases=NULL, b=NULL,
 ################### BASELINE ##############################
   # Get biasbound with no improvement in balance:
   #recall: w.pop is flat weights for sampled, user specified weights for population
+  # WEIGHTED K SO DN WANT TO ALSO WEIGHT U IN BIASBOUND AND GETDIST
+    #rather than editing those fucntions, for now im just going to drop the arg in all teh calls in kbal so it's less editing for the first try
   biasbound_orig=biasbound(w = rep(1,N),
-                           w.pop = w.pop, 
+                           #w.pop = w.pop, 
                            observed=observed, target = target,
                            svd.out = svd.out, hilbertnorm = 1)
 #NB: not well defined when pass in K.svd not K
   getdist.orig = getdist(target=target, observed = observed,
-                         w = rep(1,N), w.pop = w.pop, K=K)
+                         w = rep(1,N),
+                         #w.pop = w.pop,
+                         K=K)
   L1_orig = getdist.orig$L1
 
   if(printprogress==TRUE) {
@@ -1033,14 +1051,14 @@ kbal = function(allx, useasbases=NULL, b=NULL,
   if(!is.null(numdims)){
     U2=U[,1:numdims, drop=FALSE]
     
-    U2.w.pop <- w.pop*U2
-    getw.out= getw(target=target, observed=observed, svd.U=U2.w.pop, 
+   # U2.w.pop <- w.pop*U2
+    getw.out= getw(target=target, observed=observed, svd.U=U2, 
                    ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
     converged = getw.out$converged
     biasboundnow=biasbound( w = getw.out$w,
                             observed=observed,  target = target,
                             svd.out = svd.out, 
-                            w.pop = w.pop, 
+                           # w.pop = w.pop, 
                             hilbertnorm = 1)
     if(!converged) {
         numpass = numdims
@@ -1064,7 +1082,9 @@ kbal = function(allx, useasbases=NULL, b=NULL,
     biasbound_opt = biasboundnow
     dist.orig= biasbound_orig
     L1_optim = getdist(target=target, observed = observed,
-                       w = getw.out$w, w.pop = w.pop, K=K)$L1
+                       w = getw.out$w,
+                      # w.pop = w.pop, 
+                       K=K)$L1
   }
  
   
@@ -1080,9 +1100,9 @@ kbal = function(allx, useasbases=NULL, b=NULL,
     
     while(keepgoing==TRUE){
       U_try=U[,1:thisnumdims, drop=FALSE]
-      U_try.w.pop <- w.pop*U_try
+      #U_try.w.pop <- w.pop*U_try
       getw.out= suppressWarnings(getw(target = target,
-                                      observed=observed, svd.U = U_try.w.pop, 
+                                      observed=observed, svd.U = U_try, 
                                       ebal.tol = ebal.tol, ebal.maxit = ebal.maxit))
       
       convergence.record = c(convergence.record, getw.out$converged)
@@ -1090,7 +1110,7 @@ kbal = function(allx, useasbases=NULL, b=NULL,
       biasboundnow=biasbound(w = getw.out$w,
                              observed=observed,  target = target,
                              svd.out = svd.out, 
-                             w.pop = w.pop, 
+                             #w.pop = w.pop, 
                              hilbertnorm = 1)
       if(printprogress == TRUE & is.null(constraint)) {
           cat("With",thisnumdims,"dimensions of K, ebalance convergence is", getw.out$converged ,"yielding biasbound (norm=1) of",
@@ -1149,20 +1169,22 @@ kbal = function(allx, useasbases=NULL, b=NULL,
             cat("Re-running at optimal choice of numdims,", numdims, "\n")
         }
         if(is.null(constraint)) {
-            U_final.w.pop <- w.pop*U[,1:numdims, drop = FALSE]
+            U_final <- U[,1:numdims, drop = FALSE]
         } else {
-            U_final.w.pop <- w.pop*U[,1:(numdims+ncol(constraint)), drop = FALSE]
+            U_final <- U[,1:(numdims+ncol(constraint)), drop = FALSE]
         }
         
-        getw.out = getw(target= target, observed=observed, svd.U=U_final.w.pop, 
+        getw.out = getw(target= target, observed=observed, svd.U=U_final, 
                         ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
         biasbound_opt= biasbound(w = getw.out$w, observed=observed, target = target, 
                                  svd.out = svd.out, 
-                                 w.pop = w.pop,
+                                # w.pop = w.pop,
                                  hilbertnorm = 1)
         #NB: not well defined iF K.svd passed in
         L1_optim = getdist(target=target, observed = observed,
-                           w = getw.out$w, w.pop = w.pop, K=K)$L1
+                           w = getw.out$w,
+                           #w.pop = w.pop,
+                           K=K)$L1
     
     #asked for convergence, but NO CONVERGED DIMS  
     } else if(ebal.convergence) {
@@ -1170,8 +1192,8 @@ kbal = function(allx, useasbases=NULL, b=NULL,
         #if we sent in constraints let's return weights just on these 
         if(!is.null(constraint)){
             U_constraint=U[,1:(minnumdims-1), drop=FALSE]
-            U_c.w.pop <- w.pop*U_constraint
-            getw.out= getw(target = target, observed=observed, svd.U = U_c.w.pop, 
+           #U_c.w.pop <- w.pop*U_constraint
+            getw.out= getw(target = target, observed=observed, svd.U = U_constraint, 
                            ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
             convergence.record = getw.out$converged
             warning("Ebalance did not converge within tolerance for any ",
@@ -1183,10 +1205,12 @@ kbal = function(allx, useasbases=NULL, b=NULL,
                                     observed=observed, 
                                     target = target,
                                     svd.out = svd.out, 
-                                    w.pop = w.pop, 
+                                   # w.pop = w.pop, 
                                     hilbertnorm = 1)
             L1_optim = getdist(target=target, observed = observed,
-                               w = getw.out$w, w.pop = w.pop, K=K)$L1
+                               w = getw.out$w,
+                               #w.pop = w.pop,
+                               K=K)$L1
             numdims = NULL
         } else { #no constraint and no convergence
             warning("Ebalance did not converge within tolerance for any ",dist_pass[1,1],"-",
@@ -1194,16 +1218,19 @@ kbal = function(allx, useasbases=NULL, b=NULL,
                     " searched dimensions of K.\nDisregarding ebalance convergence and returning biasbound, L1 distance, and weights that yeild the minimum biasbound.")
             #disregard convergence and pick minnumdims
             numdims=dimseq[which(dist.record==min(dist.record,na.rm=TRUE))]
-            U_final.w.pop <- w.pop*U[,1:numdims, drop = FALSE]
-            getw.out = getw(target= target, observed=observed, svd.U=U_final.w.pop, 
+            #U_final.w.pop <- w.pop*U[,1:numdims, drop = FALSE]
+            U_final <- U[,1:numdims, drop = FALSE]
+            getw.out = getw(target= target, observed=observed, svd.U=U_final, 
                             ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
             biasbound_opt= biasbound(w = getw.out$w, observed=observed, target = target, 
                                      svd.out = svd.out, 
-                                     w.pop = w.pop,
+                                     #w.pop = w.pop,
                                      hilbertnorm = 1)
             #NB: not well defined iF K.svd passed in
             L1_optim = getdist(target=target, observed = observed,
-                               w = getw.out$w, w.pop = w.pop, K=K)$L1
+                               w = getw.out$w, 
+                               #w.pop = w.pop,
+                               K=K)$L1
             
         }
     #User did not ask for convergence
@@ -1217,7 +1244,8 @@ kbal = function(allx, useasbases=NULL, b=NULL,
                         immediate. = TRUE)
                 numdims=min(numdims)
             }
-            U_final.w.pop <- w.pop*U[,1:numdims, drop = FALSE]
+            #U_final.w.pop <- w.pop*U[,1:numdims, drop = FALSE]
+            U_final <- U[,1:numdims, drop = FALSE]
         } else {
             dimseq=seq(minnumdims-ncol(constraint),maxnumdims,incrementby)
             numdims=dimseq[which(dist.record==min(dist.record,na.rm=TRUE))]
@@ -1226,22 +1254,25 @@ kbal = function(allx, useasbases=NULL, b=NULL,
                         immediate. = TRUE)
                 numdims=min(numdims)
             }
-            U_final.w.pop <- w.pop*U[,1:(numdims + ncol(constraint)), drop = FALSE]
+            #U_final.w.pop <- w.pop*U[,1:(numdims + ncol(constraint)), drop = FALSE]
+            U_final <- U[,1:(numdims + ncol(constraint)), drop = FALSE]
         }
         
         if(printprogress == TRUE) {
             cat("Disregarding ebalance convergence and re-running at optimal choice of numdims,", numdims, "\n")
         }
 
-        getw.out = getw(target= target, observed=observed, svd.U=U_final.w.pop, 
+        getw.out = getw(target= target, observed=observed, svd.U=U_final, 
                         ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
         biasbound_opt= biasbound(w = getw.out$w, observed=observed, target = target, 
                                  svd.out = svd.out, 
-                                 w.pop = w.pop,
+                                 #w.pop = w.pop,
                                  hilbertnorm = 1)
         #NB: not well defined iF K.svd passed in
         L1_optim = getdist(target=target, observed = observed,
-                           w = getw.out$w, w.pop = w.pop, K=K)$L1
+                           w = getw.out$w,
+                           #w.pop = w.pop, 
+                           K=K)$L1
     }
 }
   #for now a crude warning if pass K.svd in for L1 distance
