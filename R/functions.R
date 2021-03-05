@@ -24,7 +24,7 @@
 #' @importFrom Rcpp sourceCpp 
 #' @importFrom RcppParallel RcppParallelLibs
 #' @export
-makeK = function(allx, useasbases=NULL, b=NULL, linkernel = FALSE){
+makeK = function(allx, useasbases=NULL, b=NULL, linkernel = FALSE, scale = TRUE){
   N=nrow(allx)
   # If no "useasbasis" given, assume all observations are to be used.
   if(is.null(useasbases)) {useasbases = rep(1, N)}
@@ -32,7 +32,9 @@ makeK = function(allx, useasbases=NULL, b=NULL, linkernel = FALSE){
   #default b is set to 2ncol to match kbal for now
   if (is.null(b)){ b=2*ncol(allx) }
   
-  allx = scale(allx)
+  if(scale) {
+      allx = scale(allx)
+  } 
   bases = allx[useasbases==1, ]
   
   #removed scaling based on bases and just rescaled all of allx then subsetted
@@ -190,7 +192,6 @@ dimw = function(X,w,target){
 #' @param observed a numeric vector of length equal to the total number of units where sampled/control units take a value of 1 and population/treated units take a value of 0.
 #' @param svd.U a matrix of left singular vectors from performing \code{svd()} on the kernel matrix.
 #' @param ebal.tol tolerance level used by custom entropy balancing function \code{ebalance_custom}. Default is 1e-6
-#' @param nconstraint in the case that the user wants to require mean balance on a set of vectors appended to the front of \code{svd.U}, a numeric input to indicate the number of vector constraints appended
 #' @return \item{w}{numeric vector of weights.}
 #' @examples
 #' \donttest{
@@ -210,7 +211,7 @@ dimw = function(X,w,target){
 #' U2=U[,1:10, drop=FALSE]
 #' getw.out=getw(target=lalonde$nsw, observed=1-lalonde$nsw, svd.U=U2)}
 #' @export
-getw = function(target, observed, svd.U, ebal.tol=1e-6, nconstraint = NULL){
+getw = function(target, observed, svd.U, ebal.tol=1e-6,  ebal.maxit = 350){
 
   # To trick ebal into using a control group that corresponds to the
   # observed and a treated that corresponds to the "target" group,
@@ -227,7 +228,7 @@ getw = function(target, observed, svd.U, ebal.tol=1e-6, nconstraint = NULL){
                                    base.weight = NULL,
                                    norm.constant  = NULL,
                                    coefs = NULL ,
-                                   max.iterations = 200,
+                                   max.iterations = ebal.maxit,
                                    constraint.tolerance = ebal.tol,
                                    print.level=0),
                    silent=TRUE)
@@ -235,11 +236,8 @@ getw = function(target, observed, svd.U, ebal.tol=1e-6, nconstraint = NULL){
   converged = FALSE
   #earlyfail = FALSE
   if ("try-error"%in%class(bal.out.pc)){
-      # if((is.null(nconstraint) & ncol(svd.U) <= 2) || (!is.null(nconstraint) && ncol(svd.U) - nconstraint <= 2)) {
-      #     earlyfail = TRUE
-      #     warning("Kbal was unable to successfully find weights because ebalance convergence failed within first two dimensions of K. Returning equal weights.")
-      #     
-      # }
+          warning("\'ebalace_custom()\' encountered an error. Returning equal weights.", 
+                  .immediate = T)
     w=rep(1,N)
     
   }
@@ -306,7 +304,7 @@ getw = function(target, observed, svd.U, ebal.tol=1e-6, nconstraint = NULL){
 #'                  w = w_opt)}
 #' @export
 getdist <- function(target, observed, K, svd.U = NULL,
-                    w=NULL, numdims = NULL, w.pop = NULL, ebal.tol=NULL) {
+                    w=NULL, numdims = NULL, w.pop = NULL, ebal.tol=NULL, ebal.maxit = NULL) {
 
         R=list()
         N=nrow(K)
@@ -336,20 +334,17 @@ getdist <- function(target, observed, K, svd.U = NULL,
             
         }
         #if user does not provide weights, go get them
-        
-        #### THIS IS WRONG IF WE USE MEANFIRST!!!! XXXX GO FIX!!!
-        # XXXX INCORPERATE w.pop XXX
         if(is.null(w)) {
             if(is.null(ebal.tol)) {ebal.tol = 1e-6}
             if(is.null(numdims)) {stop("If weights w input is not specified, numdims must be in order to calculate these weights internally")}
             U_w.pop <- w.pop*svd.U
-            w = getw(target = target, observed=observed,
+            w = suppressWarnings(getw(target = target, observed=observed,
                      svd.U = U_w.pop[,1:numdims, drop=FALSE],
-                     ebal.tol=ebal.tol)$w
+                     ebal.tol=ebal.tol, ebal.maxit = ebal.maxit)$w)
 
             #if ebal fails we get weights of 1 for everyone
             if (sum(w ==1) == length(w)){
-                stop("ebalance failed to converge for this choice of numdims dimensions of the SVD of the kernel matrix")
+                stop("ebalance failed for this choice of numdims dimensions of the SVD of the kernel matrix")
             }
         }
         #just "average row Kt"
@@ -534,13 +529,17 @@ kbal = function(allx, useasbases=NULL, b=NULL,
                 treatment=NULL,
                 population.w = NULL,
                 K=NULL, K.svd = NULL,
+                scale_data = TRUE,
+                drop_multicollin = TRUE,
                 linkernel = FALSE,
                 meanfirst = NULL,
                 constraint = NULL,
+                scale_constraint = TRUE,
                 numdims=NULL,
                 minnumdims=NULL, maxnumdims=NULL,
                 fullSVD = FALSE,
                 incrementby=1,
+                ebal.maxit = NULL,
                 ebal.tol=1e-6,
                 ebal.convergence = NULL,
                 printprogress = TRUE) {
@@ -556,28 +555,35 @@ kbal = function(allx, useasbases=NULL, b=NULL,
     #default setting/data set up
   
   #0. multicolinearity check
-    qr_X = qr(allx)
-    multicollin = FALSE
-    if(qr_X$rank < ncol(allx)) {
-      warning("\"allx\" contains collinear columns. Dropping these columns", 
-              immediate. = TRUE)
-      multicollin = TRUE
+    if(drop_multicollin) {
+        qr_X = qr(allx)
+        multicollin = FALSE
+        if(qr_X$rank < ncol(allx)) {
+            warning("\"allx\" contains collinear columns. Dropping these columns", 
+                    immediate. = TRUE)
+            multicollin = TRUE
+        }
+        allx_update = allx
+        dropped_cols = NULL
+        while(multicollin == TRUE){
+            cor = cor(allx_update)
+            diag(cor) = 0
+            cor[lower.tri(cor)] = 0
+            cor = abs(cor)
+            drop = which(cor == max(cor), arr.ind  =TRUE)[1,1]
+            dropped_cols = c(dropped_cols, rownames(which(cor == max(cor), arr.ind  =TRUE))[1])
+            allx_update = allx_update[,-drop]
+            if(qr(allx_update)$rank == ncol(allx_update)) {multicollin = FALSE}
+            
+        }
+        allx = allx_update
+    } else {
+        multicollin = NA
+        dropped_cols = NULL
     }
     
-    allx_update = allx
-    dropped_cols = NULL
-    while(multicollin == TRUE){
-      cor = cor(allx_update)
-      diag(cor) = 0
-      cor[lower.tri(cor)] = 0
-      cor = abs(cor)
-      drop = which(cor == max(cor), arr.ind  =TRUE)[1,1]
-      dropped_cols = c(dropped_cols, rownames(which(cor == max(cor), arr.ind  =TRUE))[1])
-      allx_update = allx_update[,-drop]
-      if(qr(allx_update)$rank == ncol(allx_update)) {multicollin = FALSE}
-      
-    }
-    allx = allx_update
+    
+    
     
   #1. checking sampled and sampledinpop
   if(!is.null(sampled)) { 
@@ -661,15 +667,20 @@ kbal = function(allx, useasbases=NULL, b=NULL,
     
     #Setting defaults - useasbases: If we don't specify which observations to use as bases,
     # use all as default unless K is very large, then use sample set.
-    if (is.null(useasbases) & N <= 4000) {
+    if (is.null(useasbases) & N <= 4000 & !linkernel) {
             useasbases = rep(1,N)
-    } else if(is.null(useasbases)) {
+    } else if(is.null(useasbases) & !linkernel) {
         if(is.null(K) & is.null(K.svd) ) {
             warning("Dimensions of K greater than 4000, using sampled as default bases",
                     immediate. = TRUE)
         }
           useasbases = as.numeric(observed==1)
     }
+    #for a linear kernel, the bases are gonna be defined by the cols of the data
+    #we will use all of them
+    if (is.null(useasbases) & linkernel) {
+        useasbases = rep(1,ncol(allx))
+    } 
  
     #Population  weights
     #default for population weights is to have them all equal
@@ -727,15 +738,17 @@ kbal = function(allx, useasbases=NULL, b=NULL,
             
         } else { maxnumdims = min(ncol(allx), 500) } 
         trunc_svd_dims = .8*sum(useasbases) 
-    } else{#pass in maxnumdims manually, then we still need to set Rspectra = min 500
+    } else{#2021: if pass max, want to still get svd out more dims so that bb is correct
         trunc_svd_dims = max(.8*sum(useasbases), maxnumdims)
+        #in case that's bigger than the columns we have is checked below afer we have have K
     }
     #setting defaults - b: adding default b within the kbal function rather than in makeK
     #changing default to be 2*ncol to match kbal
-    if (is.null(b)){ b = 2*ncol(allx) }
     if(!is.null(b) && length(b) != 1) {
         stop("\"b \" must be a scalar.")
     }
+    
+    if (is.null(b)){ b = 2*ncol(allx) }
     
     #9. now checking numdims if passed in
     if(!is.null(numdims) && numdims>maxnumdims) { #check not over max
@@ -760,9 +773,26 @@ kbal = function(allx, useasbases=NULL, b=NULL,
         fullSVD = TRUE
     } else if(maxnumdims == ncol(allx)) { #for linear kernel this is maxnumdims = ncol
         fullSVD = TRUE
+    } 
+    
+############ Direct CONSTRAINT #############
+    #if user passes in constraint to append, ensure it's scaled and dn have mc issues
+    if(!is.null(constraint)) {
+        if(scale_constraint) {
+            constraint <- scale(constraint)
+        }
+        qr_constr = qr(constraint)
+        multicollin_constr = FALSE
+        if(qr_constr$rank < ncol(constraint)) {
+            stop("\"constraint\" contains collinear columns.")
+        }
+        
     }
     
+    
+    
 ################## MEAN FIRST #################
+    
     meanfirst_dims = NULL
     if(!is.null(meanfirst) && meanfirst == TRUE) {
         if(!is.null(constraint)) {
@@ -772,9 +802,13 @@ kbal = function(allx, useasbases=NULL, b=NULL,
         kbalout.mean = suppressWarnings(kbal(allx=allx, 
                            treatment=treatment,
                            sampled = sampled,
+                           scale_data = TRUE, 
+                           drop_multicollin = TRUE, #this doesnt really matter I think
                            sampledinpop = sampledinpop,
                            useasbases = useasbases,
                            meanfirst = FALSE,
+                           ebal.tol = ebal.tol,
+                           ebal.maxit = ebal.maxit,
                            ebal.convergence = TRUE, 
                            linkernel = TRUE,
                            printprogress = FALSE))
@@ -854,8 +888,9 @@ kbal = function(allx, useasbases=NULL, b=NULL,
                           " of the variance of \"K\". The biasbound optimization may not perform as expected. You many want to increase \"maxnumdims\" to capture more of the varince of \"K\".", immediate. = TRUE)
               }
           } else { #use svds, suppressing warnings that it prints if uses full size svd
+             
               svd.out= RSpectra::svds(K, trunc_svd_dims)
-              warning("When bases are chosen such that \"K\" is nonsymmetric, the proportion of total variance in \"K\" accounted for by the truncated SVD with",
+              warning("When bases are chosen such that \"K\" is nonsymmetric, the proportion of total variance in \"K\" accounted for by the truncated SVD with ",
                       trunc_svd_dims," first singular values is unknown.",
                       immediate. = TRUE)
               var_explained = NULL
@@ -906,9 +941,11 @@ kbal = function(allx, useasbases=NULL, b=NULL,
   } else { 
       if(printprogress == TRUE) {cat("Building kernel matrix \n")}
       if(linkernel == FALSE) {
-          K = makeK(allx = allx, useasbases = useasbases, b=b)
+          K = makeK(allx = allx, useasbases = useasbases, b=b, 
+                    scale = scale_data)
       } else {
           K = makeK(allx = allx,
+                    scale = scale_data,
                     useasbases = useasbases,  #unnecc/bases not used for lin kernel
                     linkernel = TRUE)
       }
@@ -933,7 +970,7 @@ kbal = function(allx, useasbases=NULL, b=NULL,
                           " of the variance of \"K\". The biasbound optimization may not perform as expected. You many want to increase \"maxnumdims\" to capture more of the variance of \"K\" \n", immediate. = TRUE)
                   }
           } else { #use truncated svd
-              svd.out= RSpectra::svds(K, trunc_svd_dims)
+              svd.out= RSpectra::svds(K, round(trunc_svd_dims))
               warning("When bases are chosen such that \"K\" is nonsymmetric, the proportion of total variance in \"K\" accounted for by the truncated SVD with ",
                       trunc_svd_dims," is unknown", immediate. = TRUE)
               var_explained = NULL
@@ -954,12 +991,10 @@ kbal = function(allx, useasbases=NULL, b=NULL,
     }
     
 ####### Adding Constraint to minimization: paste constraint vector to front of U
-    #default of nconstraint is NULL, unless we have a constraint and then its just the number of cols
-    nconstraint = NULL
     if(!is.null(constraint)) {
         #check dims of constraint
         #this will cause problems if pass in one constraint as a vector, it needs to be a 1 column matrix
-        if(!class(constraint) %in% c("matrix", "data.frame")) {
+        if(!class(constraint)[1] %in% c("matrix", "data.frame")) {
             stop("\"constraint\" must be a matrix")
         }
         if(nrow(constraint) != N) { 
@@ -971,7 +1006,6 @@ kbal = function(allx, useasbases=NULL, b=NULL,
         #this way we run biasbound() on svd.out to get biasbound on svd(K) only
         #but use U for getw to get weights that balance on constraints as well
         U = cbind(constraint, U) 
-        nconstraint = ncol(constraint)
         #if numdims given move it up to accomodate the constraint
         if(!is.null(numdims)) {
             numdims = numdims + ncol(constraint)
@@ -1000,8 +1034,8 @@ kbal = function(allx, useasbases=NULL, b=NULL,
     U2=U[,1:numdims, drop=FALSE]
     
     U2.w.pop <- w.pop*U2
-    getw.out=getw(target=target, observed=observed, svd.U=U2.w.pop,
-                  nconstraint = nconstraint)
+    getw.out= getw(target=target, observed=observed, svd.U=U2.w.pop, 
+                   ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
     converged = getw.out$converged
     biasboundnow=biasbound( w = getw.out$w,
                             observed=observed,  target = target,
@@ -1012,6 +1046,7 @@ kbal = function(allx, useasbases=NULL, b=NULL,
         numpass = numdims
         if(!is.null(constraint)) {numpass = numdims - ncol(constraint)}
         warning("With user-specified ", numpass," dimensions ebalance did not converge within tolerance. Disregarding ebalance convergence and returining weights, biasbound, and L1 distance for requested dimensions.")
+        
     }
     if(printprogress == TRUE & is.null(constraint)) {
         cat("With user-specified", numdims,"dimensions, biasbound (norm=1) of ",
@@ -1046,8 +1081,9 @@ kbal = function(allx, useasbases=NULL, b=NULL,
     while(keepgoing==TRUE){
       U_try=U[,1:thisnumdims, drop=FALSE]
       U_try.w.pop <- w.pop*U_try
-      getw.out=getw(target = target, observed=observed, svd.U = U_try.w.pop, 
-                    nconstraint = nconstraint)
+      getw.out= suppressWarnings(getw(target = target,
+                                      observed=observed, svd.U = U_try.w.pop, 
+                                      ebal.tol = ebal.tol, ebal.maxit = ebal.maxit))
       
       convergence.record = c(convergence.record, getw.out$converged)
     
@@ -1119,7 +1155,7 @@ kbal = function(allx, useasbases=NULL, b=NULL,
         }
         
         getw.out = getw(target= target, observed=observed, svd.U=U_final.w.pop, 
-                        nconstraint = nconstraint)
+                        ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
         biasbound_opt= biasbound(w = getw.out$w, observed=observed, target = target, 
                                  svd.out = svd.out, 
                                  w.pop = w.pop,
@@ -1135,10 +1171,11 @@ kbal = function(allx, useasbases=NULL, b=NULL,
         if(!is.null(constraint)){
             U_constraint=U[,1:(minnumdims-1), drop=FALSE]
             U_c.w.pop <- w.pop*U_constraint
-            getw.out=getw(target = target, observed=observed, svd.U = U_c.w.pop, 
-                          nconstraint = nconstraint)
+            getw.out= getw(target = target, observed=observed, svd.U = U_c.w.pop, 
+                           ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
             convergence.record = getw.out$converged
-            warning("Ebalance did not converge within tolerance for any ",dist_pass[1,1],"-",
+            warning("Ebalance did not converge within tolerance for any ",
+                    dist_pass[1,1],"-",
                     dist_pass[1,ncol(dist_pass)],
                     " searched dimensions of K.\nNo optimal numdims to return. Returning biasbound, L1 distance, and weights from balance on constraints only with ebalance convergence,",convergence.record)
             
@@ -1159,7 +1196,7 @@ kbal = function(allx, useasbases=NULL, b=NULL,
             numdims=dimseq[which(dist.record==min(dist.record,na.rm=TRUE))]
             U_final.w.pop <- w.pop*U[,1:numdims, drop = FALSE]
             getw.out = getw(target= target, observed=observed, svd.U=U_final.w.pop, 
-                            nconstraint = nconstraint)
+                            ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
             biasbound_opt= biasbound(w = getw.out$w, observed=observed, target = target, 
                                      svd.out = svd.out, 
                                      w.pop = w.pop,
@@ -1192,14 +1229,12 @@ kbal = function(allx, useasbases=NULL, b=NULL,
             U_final.w.pop <- w.pop*U[,1:(numdims + ncol(constraint)), drop = FALSE]
         }
         
-        
-        
         if(printprogress == TRUE) {
             cat("Disregarding ebalance convergence and re-running at optimal choice of numdims,", numdims, "\n")
         }
 
-        getw.out = getw(target= target, observed=observed, svd.U=U_final.w.pop,
-                        nconstraint = nconstraint)
+        getw.out = getw(target= target, observed=observed, svd.U=U_final.w.pop, 
+                        ebal.tol = ebal.tol, ebal.maxit = ebal.maxit)
         biasbound_opt= biasbound(w = getw.out$w, observed=observed, target = target, 
                                  svd.out = svd.out, 
                                  w.pop = w.pop,
